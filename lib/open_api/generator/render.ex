@@ -4,6 +4,31 @@ defmodule OpenAPI.Generator.Render do
   alias OpenAPI.Generator.Field
   alias OpenAPI.Generator.Schema
 
+  def render(%{is_behaviour: true} = file) do
+    moduledoc = render_moduledoc(file)
+
+    callbacks = render_callbacks(file.operations, file.types, file.module)
+
+    header =
+      [moduledoc]
+      |> List.flatten()
+      |> put_newlines()
+
+    module_contents =
+      [header, callbacks]
+      |> List.flatten()
+
+    quote do
+      defmodule unquote(file.module) do
+        (unquote_splicing(module_contents))
+      end
+    end
+    |> put_multiline_docs()
+    |> Code.quoted_to_algebra(escape: false)
+    |> Inspect.Algebra.format(98)
+    |> IO.iodata_to_binary()
+  end
+
   def render(file) do
     moduledoc = render_moduledoc(file)
     using = render_using(file)
@@ -12,6 +37,7 @@ defmodule OpenAPI.Generator.Render do
     struct = render_struct(file.schemas)
     field_function = render_field_function(file.schemas)
     operations = render_operations(file.operations, file.types, file.module)
+    implements = render_implements(file.operations, file.module)
 
     header =
       [moduledoc, using]
@@ -19,7 +45,7 @@ defmodule OpenAPI.Generator.Render do
       |> put_newlines()
 
     module_contents =
-      [header, default_client, types, struct, field_function, operations]
+      [header, implements, default_client, types, struct, field_function, operations]
       |> List.flatten()
 
     quote do
@@ -229,15 +255,41 @@ defmodule OpenAPI.Generator.Render do
     end)
   end
 
+  defp render_implements([], _) do
+    []
+  end
+
+  defp render_implements(_operations, module_name) do
+    behaviour = Module.concat(module_name, "Interface")
+
+    quote do
+      @behaviour unquote(behaviour)
+    end
+  end
+
   defp render_operations(operations, type_overrides, module_name) do
     operations
     |> Enum.sort_by(fn %{name: name} -> name end)
     |> Enum.map(fn operation ->
-      docstring = render_operation_docs(operation)
-      typespec = render_operation_typespec(operation, type_overrides)
+      # docstring = render_operation_docs(operation)
+      _typespec = render_operation_typespec(operation, type_overrides)
+      impl = render_operation_impl()
       function = render_operation_function(operation, module_name)
 
-      [docstring, typespec, function]
+      # [docstring, typespec, function]
+      [impl, function]
+    end)
+    |> List.flatten()
+  end
+
+  defp render_callbacks(operations, type_overrides, _module_name) do
+    operations
+    |> Enum.sort_by(fn %{name: name} -> name end)
+    |> Enum.map(fn operation ->
+      docstring = render_operation_docs(operation)
+      render_operation_callback = render_operation_callback(operation, type_overrides)
+
+      [docstring, render_operation_callback] |> put_newlines()
     end)
     |> List.flatten()
   end
@@ -315,6 +367,31 @@ defmodule OpenAPI.Generator.Render do
 
     quote do
       @spec unquote(name)(unquote_splicing(arguments)) :: unquote(return_type)
+    end
+  end
+
+  defp render_operation_impl do
+    quote do
+      @impl true
+    end
+  end
+
+  defp render_operation_callback(operation, type_overrides) do
+    name = String.to_atom(operation.name)
+
+    path_parameter_arguments =
+      Enum.map(operation.path_params, fn {_, _, type} ->
+        quote(do: unquote(to_type(type)))
+      end)
+
+    body_argument = render_operation_typespec_body(operation.body)
+    opts_argument = quote(do: keyword)
+
+    arguments = clean_list([path_parameter_arguments, body_argument, opts_argument])
+    return_type = render_return_type(operation.responses, type_overrides)
+
+    quote do
+      @callback unquote(name)(unquote_splicing(arguments)) :: unquote(return_type)
     end
   end
 

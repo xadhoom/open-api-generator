@@ -13,6 +13,7 @@ defmodule OpenAPI.Generator do
     |> collect_schema_files()
     |> process_operations()
     |> collect_operation_files()
+    |> collect_operation_intf_files()
     |> reconcile_files()
     |> write()
   end
@@ -51,7 +52,13 @@ defmodule OpenAPI.Generator do
             []
           end
 
-        file = %{name: filename, operations: [], schemas: [schema], using: using}
+        file = %{
+          name: filename,
+          operations: [],
+          schemas: [schema],
+          using: using,
+          is_behaviour: false
+        }
 
         Map.update(files, final_name, file, fn existing_file ->
           %{
@@ -98,7 +105,13 @@ defmodule OpenAPI.Generator do
             Macro.underscore(operation.module) <> ".ex"
           ])
 
-        file = %{name: filename, operations: [operation], schemas: [], using: []}
+        file = %{
+          name: filename,
+          operations: [operation],
+          schemas: [],
+          using: [],
+          is_behaviour: false
+        }
 
         Map.update(acc, operation.module, file, fn existing_file ->
           %{
@@ -110,6 +123,41 @@ defmodule OpenAPI.Generator do
       end)
 
     %State{state | operation_files: operations}
+  end
+
+  defp collect_operation_intf_files(%State{operations: operations, config: config} = state) do
+    %Config{base_location: base_location, operation_location: operation_location} = config
+
+    operations =
+      operations
+      |> List.flatten()
+      |> Enum.reduce(%{}, fn operation, acc ->
+        filename =
+          Path.join([
+            base_location,
+            operation_location,
+            Macro.underscore(operation.module) <> ".interface" <> ".ex"
+          ])
+
+        module = Module.concat([operation.module, "Interface"])
+
+        file = %{
+          name: filename,
+          operations: [operation],
+          schemas: [],
+          using: [],
+          is_behaviour: true
+        }
+
+        Map.update(acc, module, file, fn existing_file ->
+          %{
+            existing_file
+            | operations: [operation | existing_file.operations]
+          }
+        end)
+      end)
+
+    %State{state | operation_intf_files: operations}
   end
 
   #
@@ -129,6 +177,12 @@ defmodule OpenAPI.Generator do
           using: operation_file.using ++ schema_file.using
         }
       end)
+      |> Map.merge(
+        state.operation_intf_files,
+        fn _module, _file, _operation_intf_file ->
+          raise RuntimeError, message: "not implemented"
+        end
+      )
 
     %{state | files: files}
   end
@@ -158,10 +212,24 @@ defmodule OpenAPI.Generator do
         })
         |> Render.render()
 
+      # maybe_write_behaviour(module, file)
+
       File.mkdir_p!(Path.dirname(filename))
       File.write!(filename, [contents, "\n"])
     end
 
     :ok
   end
+
+  # defp maybe_write_behaviour(_original_module, %{operations: []}) do
+  #   nil
+  # end
+
+  # defp maybe_write_behaviour(operation_module, file) do
+  #   %{name: filename} = file
+  #   IO.inspect(filename)
+  #   module = Module.concat(operation_module, "Interface")
+
+  #   IO.inspect(module)
+  # end
 end
